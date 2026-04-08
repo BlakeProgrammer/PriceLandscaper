@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Price Landscaper</title>
+    <script src="https://unpkg.com/deck.gl@latest/dist.min.js"></script>
+    <script src="https://unpkg.com/maplibre-gl@3/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@3/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@3/dist/maplibre-gl.css" rel="stylesheet"/>
+    <link href="styles.css" rel="stylesheet">
+</head>
+<body>
+    <div id="ui-overlay">
+        <div id="header">
+            <h1>Price Landscaper</h1>
+            <p>Tennessee Residential Market - Redfin Listings</p>
+        </div>
+        <div id="legend">
+            <p>Price per Area</p>
+            <div class="legend-bar"></div>
+            <div class="legend-labels">
+                <span>Lower</span>
+                <span>Higher</span>
+            </div>
+        </div>
+    </div>
+    <div id="app"></div>
+    <div id="sidebar">
+        <div id="sidebar-header">
+            <h2>Selected Listing</h2>
+            <button id="close-sidebar-btn">X</button>
+        </div>
+        <div id="sidebar-content"></div>
+    </div>
+    <script>
+        const TOOLTIP_STYLE = {
+        background: 'rgba(0,0,0,0.8)',
+        color: '#fff',
+        padding: '8px 12px',
+        borderRadius: '4px',
+        fontSize: '13px',
+        fontFamily: 'monospace'
+    };
+
+    function getDistanceMeters(lat1, lon1, lat2, lon2) {
+        const R = 6371000;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function getHexCenter(col, row) {
+        const latSpacing = 0.067;
+        const lonSpacing = 0.097;
+        const lonOffset = (row % 2 !== 0) ? lonSpacing * 0.5 : 0;
+        const anchorCol = 2;
+        const anchorRow = 1;
+        const anchorLon = -86.315;
+        const anchorLat = 36.417;
+        const lat = anchorLat + (row - anchorRow) * latSpacing;
+        const lon = anchorLon + (col - anchorCol) * lonSpacing + lonOffset;
+        return {lat, lon};
+    }
+
+    function openSidebar(listings) {
+        const sidebar = document.getElementById('sidebar');
+        const content = document.getElementById('sidebar-content');
+        content.innerHTML = listings.map(l => `
+            <div class="listing-card" onclick="window.open('${l.url}', '_blank')">
+                ${l.image ? `<img src="${l.image}" style="width:100%; border-radius:4px; margin-bottom:8px;">` : ''}
+                <div class="listing-price">$${l.price.toLocaleString()}</div>
+                <div class="listing-address">${l.address}, ${l.city}</div>
+                <div class="listing-details">
+                    ${l.sqft.toLocaleString()} sqft - 
+                    $${Math.round(l.price_per_sqft).toLocaleString()}/sqft -
+                    ${l.zip}
+                </div>
+            </div>
+        `).join('');
+        sidebar.classList.add('open');
+    }
+
+    function closeSidebar() {
+        document.getElementById('sidebar').classList.remove('open');
+    }
+
+    document.getElementById('close-sidebar-btn').addEventListener('click', () => closeSidebar());
+
+    fetch('HUGElistings.json')
+        .then(r => r.json())
+        .then(data => {
+
+        // Calculate these ONCE outside updateLayers
+        const prices = data.map(l => l.price);
+        const minPrice = Math.min(...prices);
+        const maxPrice = Math.max(...prices);
+
+        function getScatterColor(price) {
+            const t = (price - minPrice) / (maxPrice - minPrice);
+            if (t < 0.2) return [1, 152, 189];
+            if (t < 0.4) return [73, 227, 206];
+            if (t < 0.6) return [216, 254, 181];
+            if (t < 0.8) return [254, 173, 84];
+            return [209, 55, 78];
+}
+
+        let currentZoom = 7;
+        const ZOOM_START_FADE = 8;   // hex starts fading out
+        const ZOOM_FULL_SCATTER = 11.5; // scatter fully visible
+        const ZOOM_ON_CLICK = 12;
+
+        function updateLayers() {
+            const z = currentZoom;
+            
+            // Calculate opacities based on zoom level
+            let hexOpacity, scatterOpacity;
+            
+            if (z <= ZOOM_START_FADE) {
+                // Only hex visible
+                hexOpacity = 0.8;
+                scatterOpacity = 0;
+            } else if (z >= ZOOM_FULL_SCATTER) {
+                // Only scatter visible
+                hexOpacity = 0;
+                scatterOpacity = 1;
+            } else {
+                // Crossfade zone between the two thresholds
+                const t = (z - ZOOM_START_FADE) / (ZOOM_FULL_SCATTER - ZOOM_START_FADE);
+                hexOpacity = 0.8 * (1 - t);
+                scatterOpacity = t;
+            }
+
+            const zoomed = z >= ZOOM_FULL_SCATTER;
+
+            const hexLayer = new deck.HexagonLayer({
+                id: 'price-layer',
+                data: data,
+                getPosition: d => [d.longitude, d.latitude],
+                getElevationWeight: d => d.price,
+                getColorWeight: d => d.price,
+                elevationAggregation: 'MEAN',  // use average instead of sum
+                colorAggregation: 'MEAN',
+                elevationScale: 10,
+                extruded: zoomed ? false : true,  // disable geometry when zoomed in
+                radius: 5000,
+                opacity: hexOpacity,
+                pickable: !zoomed,
+                colorRange: [
+                    [1, 152, 189],
+                    [73, 227, 206],
+                    [216, 254, 181],
+                    [254, 237, 177],
+                    [254, 173, 84],
+                    [209, 55, 78]
+                ],
+            });
+
+            const scatterLayer = new deck.ScatterplotLayer({
+                id: 'scatter-layer',
+                data: data,
+                getPosition: d => [d.longitude, d.latitude],
+                getRadius: 200,
+                getFillColor: d => getScatterColor(d.price),
+                opacity: scatterOpacity,
+                pickable: zoomed,
+                onClick: ({object}) => {
+                    if (!object) return;
+                    openSidebar([object]);
+                }
+            });
+
+            deckgl.setProps({ layers: [hexLayer, scatterLayer] });
+        }
+                    const deckgl = new deck.DeckGL({
+                        container: 'app',
+                        mapStyle: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+                        initialViewState: {
+                            longitude: -86.5,
+                            latitude: 35.8,
+                            zoom: 7,
+                            pitch: 45,
+                            bearing: 0
+                        },
+                        controller: true,
+                        layers: [],
+                        onViewStateChange: ({viewState}) => {
+                            currentZoom = viewState.zoom;
+                            updateLayers();
+                            if (currentZoom < ZOOM_START_FADE) closeSidebar();
+                        },
+                        getTooltip: ({object}) => {
+                            if (!object) return null;
+                            // Hex tooltip
+                            if (object.count !== undefined) {
+                                return {
+                                    html: `
+                                        <div>
+                                            <strong>Listings:</strong> ${object.count}<br/>
+                                            <strong>Avg Price:</strong> $${Math.round(object.elevationValue).toLocaleString()}
+                                        </div>
+                                    `,
+                                    style: TOOLTIP_STYLE
+                                };
+                            }
+                            // Scatter dot tooltip
+                            return {
+                                html: `
+                                    <div>
+                                        <strong>${object.address}, ${object.city}</strong><br/>
+                                        <strong>Price:</strong> $${object.price.toLocaleString()}<br/>
+                                        <strong>Sqft:</strong> ${object.sqft.toLocaleString()}
+                                    </div>
+                                `,
+                                style: TOOLTIP_STYLE
+                            };
+                        },
+                        onClick: (info) => {
+                            if (!info.object) return;
+                            if (currentZoom < ZOOM_FULL_SCATTER) {
+                                // Just zoom to where the user actually clicked
+                                // No hex center math needed
+                                const [lon, lat] = info.coordinate;
+                                deckgl.setProps({
+                                    initialViewState: {
+                                        longitude: lon,
+                                        latitude: lat,
+                                        zoom: ZOOM_ON_CLICK,
+                                        pitch: 0,
+                                        bearing: 0,
+                                        transitionDuration: 800
+                                    }
+                                });
+                            }
+                        }
+                    });
+
+                    updateLayers();
+                })
+    </script>
+</body>
+</html>
